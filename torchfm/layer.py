@@ -10,14 +10,20 @@ class FeaturesLinear(torch.nn.Module):
         self.fc = torch.nn.Embedding(sum(field_dims), output_dim)
         self.bias = torch.nn.Parameter(torch.zeros((output_dim,)))
         self.offsets = np.array((0, *np.cumsum(field_dims)[:-1]), dtype=np.long)
+        self.offsets = torch.from_numpy(self.offsets)
 
     def forward(self, x):
         """
         :param x: Long tensor of size ``(batch_size, num_fields)``
-        """
         x = x + x.new_tensor(self.offsets).unsqueeze(0)
-        return torch.sum(self.fc(x), dim=1) + self.bias
+        """
+        temp = torch.zeros_like(x)
+        temp[:,:] = self.offsets
+        #x = x + x.new_tensor(self.offsets).unsqueeze(0)
+        x = x + temp.unsqueeze(0)
 
+        return torch.sum(self.fc(x), dim=1) + self.bias
+#
 
 class FeaturesEmbedding(torch.nn.Module):
 
@@ -25,13 +31,19 @@ class FeaturesEmbedding(torch.nn.Module):
         super().__init__()
         self.embedding = torch.nn.Embedding(sum(field_dims), embed_dim)
         self.offsets = np.array((0, *np.cumsum(field_dims)[:-1]), dtype=np.long)
+        self.offsets = torch.from_numpy(self.offsets)
         torch.nn.init.xavier_uniform_(self.embedding.weight.data)
 
     def forward(self, x):
         """
         :param x: Long tensor of size ``(batch_size, num_fields)``
         """
-        x = x + x.new_tensor(self.offsets).unsqueeze(0)
+
+        temp = torch.zeros_like(x)
+        temp[:, :] = self.offsets
+        x = x + temp.unsqueeze(0)
+
+        # = x + x.new_tensor(self.offsets).unsqueeze(0)
         return self.embedding(x)
 
 
@@ -44,6 +56,7 @@ class FieldAwareFactorizationMachine(torch.nn.Module):
             torch.nn.Embedding(sum(field_dims), embed_dim) for _ in range(self.num_fields)
         ])
         self.offsets = np.array((0, *np.cumsum(field_dims)[:-1]), dtype=np.long)
+        self.offsets = torch.from_numpy(self.offsets)
         for embedding in self.embeddings:
             torch.nn.init.xavier_uniform_(embedding.weight.data)
 
@@ -51,7 +64,10 @@ class FieldAwareFactorizationMachine(torch.nn.Module):
         """
         :param x: Long tensor of size ``(batch_size, num_fields)``
         """
-        x = x + x.new_tensor(self.offsets).unsqueeze(0)
+        temp = torch.zeros_like(x)
+        temp[:, :] = self.offsets
+        x = x + temp.unsqueeze(0)
+        # x = x + x.new_tensor(self.offsets).unsqueeze(0)
         xs = [self.embeddings[i](x) for i in range(self.num_fields)]
         ix = list()
         for i in range(self.num_fields - 1):
@@ -96,7 +112,7 @@ class MultiLayerPerceptron(torch.nn.Module):
 
     def forward(self, x):
         """
-        :param x: Float tensor of size ``(batch_size, embed_dim)``
+        :param x: Float tensor of size ``(batch_size, num_fields, embed_dim)``
         """
         return self.mlp(x)
 
@@ -194,9 +210,9 @@ class AttentionalFactorizationMachine(torch.nn.Module):
         inner_product = p * q
         attn_scores = F.relu(self.attention(inner_product))
         attn_scores = F.softmax(self.projection(attn_scores), dim=1)
-        attn_scores = F.dropout(attn_scores, p=self.dropouts[0], training=self.training)
+        attn_scores = F.dropout(attn_scores, p=self.dropouts[0])
         attn_output = torch.sum(attn_scores * inner_product, dim=1)
-        attn_output = F.dropout(attn_output, p=self.dropouts[1], training=self.training)
+        attn_output = F.dropout(attn_output, p=self.dropouts[1])
         return self.fc(attn_output)
 
 
@@ -235,27 +251,3 @@ class CompressedInteractionNetwork(torch.nn.Module):
                 h = x
             xs.append(x)
         return self.fc(torch.sum(torch.cat(xs, dim=1), 2))
-
-
-class AnovaKernel(torch.nn.Module):
-
-    def __init__(self, order, reduce_sum=True):
-        super().__init__()
-        self.order = order
-        self.reduce_sum = reduce_sum
-
-    def forward(self, x):
-        """
-        :param x: Float tensor of size ``(batch_size, num_fields, embed_dim)``
-        """
-        batch_size, num_fields, embed_dim = x.shape
-        a_prev = torch.ones((batch_size, num_fields + 1, embed_dim), dtype=torch.float).to(x.device)
-        for t in range(self.order):
-            a = torch.zeros((batch_size, num_fields + 1, embed_dim), dtype=torch.float).to(x.device)
-            a[:, t+1:, :] += x[:, t:, :] * a_prev[:, t:-1, :]
-            a = torch.cumsum(a, dim=1)
-            a_prev = a
-        if self.reduce_sum:
-            return torch.sum(a[:, -1, :], dim=-1, keepdim=True)
-        else:
-            return a[:, -1, :]
